@@ -1,15 +1,35 @@
 #include <Arduino.h>
 /*
-  Cardputer ADV Frequency Generator  (v2)
+  Cardputer ADV Frequency + Noise Generator  (v3)
   See README.md for the full manual. Press 'h' on the device for in-app help.
+
+  Audio is generated in software (16-bit, 48 kHz) on its own task, with fixed
+  headroom, a smooth gain ramp (no clicks) and a soft limiter on noise. This
+  avoids the crackling that came from running the output at full scale.
+
+  Tunables (if you still hear distortion, lower these):
+    HW_VOLUME     codec/speaker hardware volume (0-255)
+    MAX_GAIN_SPK  top software level in speaker mode (0-1)
+    MAX_GAIN_HP   top software level in headphone mode (0-1)
 */
 
 #include <M5Cardputer.h>
+#include <math.h>
 
+// ---------------- audio tunables ----------------
+static const uint8_t HW_VOLUME = 192;
+static const float MAX_GAIN_SPK = 1.0f;
+static const float MAX_GAIN_HP = 0.5f;
+static const float TONE_AMP_SINE = 0.5f;
+static const float TONE_AMP_SQUARE = 0.3f;
+static const uint32_t SR = 48000;
+static const size_t BUF_LEN = 1024;
+
+// ---------------- data ----------------
 struct Preset {
   float hz;
   const char* name;
-  const char* desc;  // short description, wrapped to 2 lines (~37 chars each)
+  const char* desc;  // wrapped to 2 lines (~37 chars each)
 };
 
 const Preset PRESETS[] = {
@@ -34,6 +54,25 @@ const Preset PRESETS[] = {
 };
 const int NUM_PRESETS = sizeof(PRESETS) / sizeof(PRESETS[0]);
 
+struct NoiseDef {
+  const char* name;
+  const char* shortName;
+  const char* tag;   // spectrum shape, shown at the right of the list
+  const char* desc;
+};
+
+// order must match noiseSample() types 0..6
+const NoiseDef NOISES[] = {
+  {"White noise",  "White",  "flat",       "Equal energy at all pitches. Bright hiss; masks sound."},
+  {"Pink noise",   "Pink",   "-3 dB/oct",  "Softer than white; like steady rain. Good for focus/sleep."},
+  {"Brown noise",  "Brown",  "-6 dB/oct",  "Deep rumble; like thunder or a waterfall. Calming."},
+  {"Green noise",  "Green",  "~500 Hz",    "Mid-range around 500 Hz; natural, like forest or stream."},
+  {"Blue noise",   "Blue",   "+3 dB/oct",  "Bright and hissy; stronger highs than pink. Can be sharp."},
+  {"Violet noise", "Violet", "+6 dB/oct",  "Very bright, mostly high pitches. Can be harsh."},
+  {"Grey noise",   "Grey",   "even",       "Approx. tuned to hearing: lows/highs boosted, mids softer."},
+};
+const int NUM_NOISES = sizeof(NOISES) / sizeof(NOISES[0]);
+
 const float STEPS[] = {0.1f, 1.0f, 10.0f, 100.0f, 1000.0f};
 const int NUM_STEPS = sizeof(STEPS) / sizeof(STEPS[0]);
 const int TIMERS[] = {0, 5, 10, 15, 30, 60};
@@ -41,23 +80,26 @@ const int NUM_TIMERS = sizeof(TIMERS) / sizeof(TIMERS[0]);
 
 // ---- in-app help pages (max 9 lines, ~38 chars per line) ----
 const int HELP_PAGES = 4;
-const char* HELP_TITLES[HELP_PAGES] = {"KEYS", "PRESETS MODE", "CUSTOM MODE", "TIPS"};
+const char* HELP_TITLES[HELP_PAGES] = {"KEYS", "PRESETS & NOISE", "CUSTOM MODE", "TIPS"};
 const char* HELP_LINES[HELP_PAGES][9] = {
   {"Enter   play / stop",
-   "Tab     Presets <-> Custom",
-   "-  =    volume down / up",
+   "Tab     Presets > Custom > Noise",
+   "-  =    volume down / up (0-10)",
+   "o       output: spk / hp (hp = lower",
+   "        limit, avoids crackle)",
    "w       sine / square wave",
    "t       auto-stop timer",
-   "r       rotate screen 180",
-   "h       this help",
-   nullptr, nullptr},
-  {";       previous preset (up)",
-   ".       next preset (down)",
-   "Enter   play / stop the tone",
+   "r       rotate screen    h  help",
+   nullptr},
+  {";       previous (up)",
+   ".       next (down)",
+   "Enter   play / stop",
    "",
-   "Changing preset while playing",
-   "switches the tone instantly.",
-   nullptr, nullptr, nullptr},
+   "Changing selection while playing",
+   "switches the sound instantly.",
+   "Noise: white pink brown green",
+   "blue violet grey",
+   nullptr},
   {"0-9 .   type a frequency in Hz",
    "Del     backspace",
    ";       frequency + step",
@@ -66,68 +108,233 @@ const char* HELP_LINES[HELP_PAGES][9] = {
    "        (0.1/1/10/100/1000 Hz)",
    "Range: 0.1 - 20000 Hz",
    nullptr, nullptr},
-  {"Speaker is clearest 200Hz-8kHz.",
-   "Below ~100 Hz it is very faint or",
-   "silent: use an external amp or",
-   "headphones for low presets.",
+  {"Speaker is clearest 200 Hz - 8 kHz.",
+   "Below ~100 Hz it is faint or silent:",
+   "use headphones or an amp.",
    "",
-   "Sine is smoother; square is louder.",
+   "Headphones crackling? Press o for",
+   "hp mode and lower the volume.",
+   "Sine is smoother; square louder.",
    "Use the timer for long sessions.",
-   nullptr, nullptr},
+   nullptr},
 };
 
+// ---------------- UI state ----------------
 M5Canvas canvas(&M5Cardputer.Display);
 int W = 240, H = 135;
 int rot = 1;
 uint16_t C_HDR, C_SEL, C_DIM, C_ACC, C_BOX;
 
-enum Mode { MODE_PRESETS, MODE_CUSTOM };
+enum Mode { MODE_PRESETS, MODE_CUSTOM, MODE_NOISE };
 Mode mode = MODE_PRESETS;
 
 int presetIdx = 0;
+int noiseIdx = 1;
 String customBuf = "432";
 float curHz = 174.0f;
 int stepIdx = 1;
 int timerIdx = 0;
 bool playing = false;
 bool sine = true;
-int volume = 120;  // 0-255
+bool headphones = false;
+int volume = 5;  // 0-10
 unsigned long playStartMs = 0;
 bool helpOn = false;
 int helpPage = 0;
 
-uint8_t sineTable[64];
+// ---------------- shared with audio task ----------------
+volatile bool g_on = false;
+volatile int g_src = 0;        // 0 = tone, 1..7 = noise type + 1
+volatile float g_hz = 440.0f;
+volatile float g_gain = 0.0f;  // 0..1 master level
+volatile bool g_sine = true;
 
+// ---------------- noise generators ----------------
+struct NoiseState {
+  float b0, b1, b2, b3, b4, b5, b6;
+  float brown, pinkPrev, wPrev;
+  float lp250, lp6k;
+  float x1, x2, y1, y2;
+  uint32_t rng;
+};
+static NoiseState ns;
+// per-type scale so every noise has about the same loudness (RMS ~0.2)
+static const float NOISE_SCALE[7] = {0.3462f, 0.1143f, 3.4794f, 1.6409f, 0.1911f, 0.2448f, 0.3105f};
+static float BQ_B0, BQ_B2, BQ_A1, BQ_A2, A250, A6K;
+
+void initNoise() {
+  memset(&ns, 0, sizeof(ns));
+  ns.rng = 0x1234ABCDu ^ (uint32_t)micros();
+  if (ns.rng == 0) ns.rng = 1;
+  // band-pass around 500 Hz for "green" noise
+  const float w0 = 2.0f * (float)PI * 500.0f / (float)SR;
+  const float alpha = sinf(w0) / (2.0f * 0.7f);
+  BQ_B0 = alpha / (1.0f + alpha);
+  BQ_B2 = -BQ_B0;
+  BQ_A1 = -2.0f * cosf(w0) / (1.0f + alpha);
+  BQ_A2 = (1.0f - alpha) / (1.0f + alpha);
+  A250 = 1.0f - expf(-2.0f * (float)PI * 250.0f / (float)SR);
+  A6K = 1.0f - expf(-2.0f * (float)PI * 6000.0f / (float)SR);
+}
+
+static inline float frand() {
+  ns.rng ^= ns.rng << 13;
+  ns.rng ^= ns.rng >> 17;
+  ns.rng ^= ns.rng << 5;
+  return (float)((int32_t)ns.rng) * (1.0f / 2147483648.0f);
+}
+
+static inline float softclip(float x) {
+  if (x > 1.0f) x = 1.0f;
+  if (x < -1.0f) x = -1.0f;
+  return 1.5f * x - 0.5f * x * x * x;
+}
+
+float noiseSample(int type) {
+  float w = frand();
+  float v;
+  switch (type) {
+    case 0:
+      v = w;
+      break;
+    case 1:
+    case 4: {
+      ns.b0 = 0.99886f * ns.b0 + w * 0.0555179f;
+      ns.b1 = 0.99332f * ns.b1 + w * 0.0750759f;
+      ns.b2 = 0.96900f * ns.b2 + w * 0.1538520f;
+      ns.b3 = 0.86650f * ns.b3 + w * 0.3104856f;
+      ns.b4 = 0.55000f * ns.b4 + w * 0.5329522f;
+      ns.b5 = -0.7616f * ns.b5 - w * 0.0168980f;
+      float pink = ns.b0 + ns.b1 + ns.b2 + ns.b3 + ns.b4 + ns.b5 + ns.b6 + w * 0.5362f;
+      ns.b6 = w * 0.115926f;
+      v = (type == 1) ? pink : (pink - ns.pinkPrev);  // blue = differentiated pink
+      ns.pinkPrev = pink;
+      break;
+    }
+    case 2:
+      ns.brown = (ns.brown + 0.02f * w) / 1.02f;
+      v = ns.brown;
+      break;
+    case 3: {
+      float y = BQ_B0 * w + BQ_B2 * ns.x2 - BQ_A1 * ns.y1 - BQ_A2 * ns.y2;
+      ns.x2 = ns.x1;
+      ns.x1 = w;
+      ns.y2 = ns.y1;
+      ns.y1 = y;
+      v = y;
+      break;
+    }
+    case 5:
+      v = w - ns.wPrev;  // violet = differentiated white
+      break;
+    default:
+      ns.lp250 += A250 * (w - ns.lp250);
+      ns.lp6k += A6K * (w - ns.lp6k);
+      v = 0.6f * w + 3.0f * ns.lp250 + 0.8f * (w - ns.lp6k);
+      break;
+  }
+  ns.wPrev = w;
+  return softclip(v * NOISE_SCALE[type]);
+}
+
+// ---------------- audio task ----------------
+static int16_t audioBuf[3][BUF_LEN];
+
+void audioTask(void*) {
+  int idx = 0;
+  float phase = 0.0f;
+  float gain = 0.0f;
+  bool pending = false;
+
+  for (;;) {
+    bool on = g_on;
+    if (!on && gain < 0.0005f && !pending) {
+      gain = 0.0f;
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+
+    if (!pending) {
+      const int src = g_src;
+      const float hz = g_hz;
+      const float target = on ? g_gain : 0.0f;
+      const bool isSine = g_sine;
+      const float inc = hz / (float)SR;
+      const float amp = isSine ? TONE_AMP_SINE : TONE_AMP_SQUARE;
+
+      for (size_t i = 0; i < BUF_LEN; i++) {
+        gain += (target - gain) * 0.003f;  // ~7 ms smoothing: no clicks, no pops
+        float s;
+        if (src == 0) {
+          phase += inc;
+          if (phase >= 1.0f) phase -= 1.0f;
+          if (isSine) {
+            s = sinf(2.0f * (float)PI * phase) * amp;
+          } else {
+            s = (phase < 0.5f ? amp : -amp);
+          }
+        } else {
+          s = noiseSample(src - 1);
+        }
+        float out = s * gain * 32000.0f;
+        if (out > 32000.0f) out = 32000.0f;
+        if (out < -32000.0f) out = -32000.0f;
+        audioBuf[idx][i] = (int16_t)out;
+      }
+      pending = true;
+    }
+
+    if (M5Cardputer.Speaker.isPlaying(0) == 2) {
+      vTaskDelay(1);
+      continue;
+    }
+    if (M5Cardputer.Speaker.playRaw(audioBuf[idx], BUF_LEN, SR, false, 1, 0, false)) {
+      idx = (idx + 1) % 3;
+      pending = false;
+    } else {
+      vTaskDelay(1);
+    }
+  }
+}
+
+// ---------------- control helpers ----------------
 float clampHz(float hz) {
   if (hz < 0.1f) hz = 0.1f;
   if (hz > 20000.0f) hz = 20000.0f;
   return hz;
 }
 
-void startTone() {
-  M5Cardputer.Speaker.stop();
-  curHz = clampHz(curHz);
-  M5Cardputer.Speaker.setVolume(volume);
-  if (sine) {
-    M5Cardputer.Speaker.tone(curHz, ~0u, 0, true, sineTable, sizeof(sineTable));
+void applyGain() {
+  float maxG = headphones ? MAX_GAIN_HP : MAX_GAIN_SPK;
+  float v = volume / 10.0f;
+  g_gain = maxG * v * v;
+}
+
+void applySource() {
+  if (mode == MODE_NOISE) {
+    g_src = noiseIdx + 1;
   } else {
-    M5Cardputer.Speaker.tone(curHz, ~0u, 0, true);
+    g_hz = clampHz(curHz);
+    g_src = 0;
   }
+  g_sine = sine;
+  applyGain();
+}
+
+void startTone() {
+  applySource();
+  g_on = true;
   playing = true;
   playStartMs = millis();
 }
 
 void stopTone() {
-  M5Cardputer.Speaker.stop();
+  g_on = false;
   playing = false;
 }
 
 void restartIfPlaying() {
-  if (playing) {
-    unsigned long keep = playStartMs;
-    startTone();
-    playStartMs = keep;  // don't reset the session timer on tweaks
-  }
+  if (playing) applySource();  // live change; session timer keeps running
 }
 
 void syncBufFromHz() {
@@ -148,6 +355,7 @@ void pickLandscape() {
   }
 }
 
+// ---------------- drawing ----------------
 void drawWrapped(const char* text, int x, int y, int maxChars, int lineH, int maxLines) {
   String s = text;
   int line = 0;
@@ -177,43 +385,54 @@ void drawHeader(const char* tag, const char* right) {
 void draw() {
   canvas.fillSprite(BLACK);
 
+  const char* tag = (mode == MODE_PRESETS) ? "PRESETS" : (mode == MODE_CUSTOM) ? "CUSTOM" : "NOISE";
   char hdr[40];
-  snprintf(hdr, sizeof(hdr), "%s  vol %d%%  h:help", sine ? "sine" : "square", volume * 100 / 255);
-  drawHeader(mode == MODE_PRESETS ? "PRESETS" : "CUSTOM", hdr);
+  snprintf(hdr, sizeof(hdr), "%s  v%d/10  %s  h:help", sine ? "sine" : "square", volume,
+           headphones ? "hp" : "spk");
+  drawHeader(tag, hdr);
 
-  if (mode == MODE_PRESETS) {
+  if (mode == MODE_PRESETS || mode == MODE_NOISE) {
+    const bool isPre = (mode == MODE_PRESETS);
+    const int count = isPre ? NUM_PRESETS : NUM_NOISES;
+    const int sel = isPre ? presetIdx : noiseIdx;
     const int ROWS = 4, ROW_H = 13, TOP = 19;
-    int first = presetIdx - 1;
-    if (first > NUM_PRESETS - ROWS) first = NUM_PRESETS - ROWS;
+
+    int first = sel - 1;
+    if (first > count - ROWS) first = count - ROWS;
     if (first < 0) first = 0;
 
     canvas.setTextSize(1);
-    for (int i = 0; i < ROWS && first + i < NUM_PRESETS; i++) {
+    for (int i = 0; i < ROWS && first + i < count; i++) {
       int idx = first + i;
       int y = TOP + i * ROW_H;
-      if (idx == presetIdx) {
+      if (idx == sel) {
         canvas.fillRect(0, y - 2, W - 8, ROW_H, C_SEL);
         canvas.setTextColor(YELLOW);
       } else {
         canvas.setTextColor(WHITE);
       }
-      canvas.drawString(PRESETS[idx].name, 6, y);
-      char hz[16];
-      snprintf(hz, sizeof(hz), "%g Hz", PRESETS[idx].hz);
-      canvas.drawRightString(hz, W - 12, y);
+      char right[20];
+      if (isPre) {
+        canvas.drawString(PRESETS[idx].name, 6, y);
+        snprintf(right, sizeof(right), "%g Hz", PRESETS[idx].hz);
+      } else {
+        canvas.drawString(NOISES[idx].name, 6, y);
+        snprintf(right, sizeof(right), "%s", NOISES[idx].tag);
+      }
+      canvas.drawRightString(right, W - 12, y);
     }
 
     // scrollbar
     int trackH = ROWS * ROW_H;
-    int thumbH = max(6, trackH * ROWS / NUM_PRESETS);
-    int thumbY = TOP - 2 + (trackH - thumbH) * presetIdx / max(1, NUM_PRESETS - 1);
+    int thumbH = max(6, trackH * ROWS / count);
+    int thumbY = TOP - 2 + (trackH - thumbH) * sel / max(1, count - 1);
     canvas.fillRect(W - 5, TOP - 2, 3, trackH, C_BOX);
     canvas.fillRect(W - 5, thumbY, 3, thumbH, C_ACC);
 
     // description box
     canvas.drawRoundRect(2, 74, W - 4, 28, 4, C_DIM);
     canvas.setTextColor(LIGHTGREY);
-    drawWrapped(PRESETS[presetIdx].desc, 7, 78, 37, 10, 2);
+    drawWrapped(isPre ? PRESETS[presetIdx].desc : NOISES[noiseIdx].desc, 7, 78, 37, 10, 2);
   } else {
     canvas.setTextSize(1);
     canvas.setTextColor(C_DIM);
@@ -243,7 +462,11 @@ void draw() {
   if (playing) {
     canvas.setTextColor(GREEN);
     char p[32];
-    snprintf(p, sizeof(p), "> %g Hz", curHz);
+    if (mode == MODE_NOISE) {
+      snprintf(p, sizeof(p), "> %s", NOISES[noiseIdx].shortName);
+    } else {
+      snprintf(p, sizeof(p), "> %g Hz", curHz);
+    }
     canvas.drawString(p, 4, 107);
   } else {
     canvas.setTextColor(RED);
@@ -263,10 +486,12 @@ void draw() {
   }
   canvas.drawRightString(tm, W - 6, 108);
 
-  float shownHz = (mode == MODE_PRESETS) ? PRESETS[presetIdx].hz : clampHz(customBuf.toFloat());
-  if (shownHz < 100.0f) {
-    canvas.setTextColor(ORANGE);
-    canvas.drawString("Too low for built-in speaker", 4, 125);
+  if (mode != MODE_NOISE) {
+    float shownHz = (mode == MODE_PRESETS) ? PRESETS[presetIdx].hz : clampHz(customBuf.toFloat());
+    if (shownHz < 100.0f) {
+      canvas.setTextColor(ORANGE);
+      canvas.drawString("Too low for built-in speaker", 4, 125);
+    }
   }
 
   canvas.pushSprite(0, 0);
@@ -291,6 +516,7 @@ void drawHelp() {
   canvas.pushSprite(0, 0);
 }
 
+// ---------------- setup / input ----------------
 void setup() {
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
@@ -307,23 +533,29 @@ void setup() {
   C_ACC = M5Cardputer.Display.color565(80, 200, 255);
   C_BOX = M5Cardputer.Display.color565(50, 50, 60);
 
-  for (int i = 0; i < 64; i++) {
-    sineTable[i] = (uint8_t)(128 + 127 * sinf(2.0f * PI * i / 64.0f));
-  }
-  M5Cardputer.Speaker.setVolume(volume);
+  initNoise();
   curHz = PRESETS[presetIdx].hz;
+  applySource();
+
+  M5Cardputer.Speaker.setVolume(HW_VOLUME);
+  xTaskCreatePinnedToCore(audioTask, "audio", 6144, nullptr, 3, nullptr, 0);
   draw();
 }
 
 void handleChar(char c) {
   if (c == '-') {
-    volume = max(0, volume - 15);
-    M5Cardputer.Speaker.setVolume(volume);
+    if (volume > 0) volume--;
+    applyGain();
     return;
   }
   if (c == '=') {
-    volume = min(255, volume + 15);
-    M5Cardputer.Speaker.setVolume(volume);
+    if (volume < 10) volume++;
+    applyGain();
+    return;
+  }
+  if (c == 'o' || c == 'O') {
+    headphones = !headphones;
+    applyGain();
     return;
   }
   if (c == 'w' || c == 'W') {
@@ -355,6 +587,14 @@ void handleChar(char c) {
     } else if (c == '.') {
       presetIdx = (presetIdx + 1) % NUM_PRESETS;
       curHz = PRESETS[presetIdx].hz;
+      restartIfPlaying();
+    }
+  } else if (mode == MODE_NOISE) {
+    if (c == ';') {
+      noiseIdx = (noiseIdx - 1 + NUM_NOISES) % NUM_NOISES;
+      restartIfPlaying();
+    } else if (c == '.') {
+      noiseIdx = (noiseIdx + 1) % NUM_NOISES;
       restartIfPlaying();
     }
   } else {
@@ -397,10 +637,10 @@ void loop() {
       if (!nav) helpOn = false;
     } else {
       if (st.tab) {
-        mode = (mode == MODE_PRESETS) ? MODE_CUSTOM : MODE_PRESETS;
+        mode = (Mode)((mode + 1) % 3);
         if (mode == MODE_PRESETS) {
           curHz = PRESETS[presetIdx].hz;
-        } else {
+        } else if (mode == MODE_CUSTOM) {
           curHz = clampHz(customBuf.toFloat());
         }
         restartIfPlaying();
@@ -414,7 +654,8 @@ void loop() {
         if (playing) {
           stopTone();
         } else {
-          curHz = (mode == MODE_PRESETS) ? PRESETS[presetIdx].hz : clampHz(customBuf.toFloat());
+          if (mode == MODE_PRESETS) curHz = PRESETS[presetIdx].hz;
+          else if (mode == MODE_CUSTOM) curHz = clampHz(customBuf.toFloat());
           startTone();
         }
       }

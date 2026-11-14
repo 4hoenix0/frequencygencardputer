@@ -1,7 +1,7 @@
-# Cardputer ADV Frequency Generator
+# Cardputer ADV Frequency + Noise Generator
 
-A tone generator for the M5Stack Cardputer ADV with pretuned frequencies and a custom generator.
-The built-in help is always available on the device: press **h**.
+A tone and noise generator for the M5Stack Cardputer ADV: pretuned frequencies, a custom frequency
+generator, and seven noise colors. The built-in help is always on the device: press **h**.
 
 ## Controls
 
@@ -9,20 +9,21 @@ The built-in help is always available on the device: press **h**.
 | Key | Action |
 |---|---|
 | `Enter` | Play / stop |
-| `Tab` | Switch between Presets and Custom |
-| `-` / `=` | Volume down / up |
-| `w` | Toggle sine / square wave |
+| `Tab` | Cycle modes: Presets, Custom, Noise |
+| `-` / `=` | Volume down / up (0-10) |
+| `o` | Output: `spk` (speaker) or `hp` (headphones, lower level cap) |
+| `w` | Toggle sine / square wave (tones only) |
 | `t` | Cycle auto-stop timer: off, 5, 10, 15, 30, 60 min |
 | `r` | Rotate the screen 180 degrees |
 | `h` | Help (use `;` and `.` to change page, any other key closes) |
 
-### Presets mode
+### Presets and Noise modes
 | Key | Action |
 |---|---|
-| `;` (up arrow) | Previous preset |
-| `.` (down arrow) | Next preset |
+| `;` (up arrow) | Previous item |
+| `.` (down arrow) | Next item |
 
-Changing preset while a tone is playing switches the tone instantly.
+Changing the selection while a sound is playing switches it instantly.
 
 ### Custom mode
 | Key | Action |
@@ -35,7 +36,7 @@ Changing preset while a tone is playing switches the tone instantly.
 
 The tone updates live while it is playing.
 
-## Presets
+## Frequency presets
 
 | Frequency | Name | Description |
 |---|---|---|
@@ -58,17 +59,43 @@ The tone updates live while it is playing.
 | 6 Hz | Theta 6 | Theta range (drowsy, meditative); too low for the speaker |
 | 2 Hz | Delta 2 | Delta range (deep sleep); too low for the speaker |
 
+## Noise colors
+
+| Noise | Shape | Description |
+|---|---|---|
+| White | flat | Equal energy at all pitches; bright hiss that masks sound |
+| Pink | -3 dB/octave | Softer than white; like steady rain; good for focus and sleep |
+| Brown | -6 dB/octave | Deep rumble; like thunder or a waterfall; calming |
+| Green | around 500 Hz | Mid-range; natural, like a forest or stream |
+| Blue | +3 dB/octave | Bright and hissy; stronger highs than pink; can be sharp |
+| Violet | +6 dB/octave | Very bright, mostly high pitches; can be harsh |
+| Grey | even loudness | Approximation tuned to human hearing: lows and highs boosted, mids softer |
+
+## Audio quality and headphones
+
+Audio is generated in software at 16-bit / 48 kHz on its own task, with fixed headroom, smooth
+volume changes (no clicks) and a soft limiter on noise. This removes the crackling that came from
+running the output at full scale.
+
+- Using headphones? Press `o` to switch to `hp` mode, which caps the level well below the speaker
+  setting. Headphones are far more sensitive than the speaker.
+- Still hearing distortion? Lower `HW_VOLUME`, `MAX_GAIN_SPK` or `MAX_GAIN_HP` at the top of
+  `src/main.cpp` and rebuild.
+- The built-in speaker is clearest between roughly 200 Hz and 8 kHz. Below about 100 Hz it is very
+  faint or silent; use headphones or an external amplifier for the low presets.
+- Sine is smoother; square is louder.
+- If the screen is upside down, press `r`.
+
 ## Notes
 
-- The built-in speaker is small. It is clearest between roughly 200 Hz and 8 kHz. Below about 100 Hz it is very faint or silent; use an external amplifier or headphones for the low presets.
-- Sine is smoother; square is louder.
-- These frequencies are popular for relaxation and meditation, but there is no good scientific evidence that they heal anything. Treat this as a sound and relaxation tool.
-- If the screen is upside down, press `r`.
+These sounds are popular for relaxation and meditation, but there is no good scientific evidence that
+specific frequencies heal anything. Treat this as a sound and relaxation tool, and keep the volume
+comfortable, especially with headphones.
 
 ## Building
 
 Push this repository to GitHub. The workflow in `.github/workflows/build.yml` builds the firmware and
-publishes a single flashable `cardputer_freq_gen.bin` under **Actions → latest run → Artifacts**.
+publishes a single flashable `cardputer_freq_gen.bin` under **Actions, latest run, Artifacts**.
 Flash it at address `0x0` with the browser flasher (hold G0 while plugging in the Cardputer).
 
 To build locally instead: install PlatformIO and run `pio run`.
