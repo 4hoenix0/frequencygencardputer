@@ -103,3 +103,11 @@ running the output at full scale.
 These sounds are popular for relaxation and meditation, but there is no good scientific evidence that
 specific frequencies heal anything. Treat this as a sound and relaxation tool, and keep the volume
 comfortable, especially with headphones.
+
+## Building
+
+Push this repository to GitHub. The workflow in `.github/workflows/build.yml` builds the firmware and
+publishes a single flashable `cardputer_freq_gen.bin` under **Actions, latest run, Artifacts**.
+Flash it at address `0x0` with the browser flasher (hold G0 while plugging in the Cardputer).
+
+To build locally instead: install PlatformIO and run `pio run`.
