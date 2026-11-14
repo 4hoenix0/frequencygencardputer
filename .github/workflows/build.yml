@@ -1,0 +1,39 @@
+name: Build firmware
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: pip install platformio esptool
+
+      - name: Build
+        run: pio run
+
+      - name: Merge into a single flashable .bin
+        run: |
+          B=.pio/build/cardputer
+          BOOT_APP0=$(find ~/.platformio/packages -name boot_app0.bin | head -n 1)
+          python -m esptool --chip esp32s3 merge_bin \
+            -o cardputer_freq_gen.bin \
+            --flash_mode dio --flash_size 8MB \
+            0x0 $B/bootloader.bin \
+            0x8000 $B/partitions.bin \
+            0xe000 "$BOOT_APP0" \
+            0x10000 $B/firmware.bin
+          ls -l cardputer_freq_gen.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cardputer_freq_gen.bin
+          path: cardputer_freq_gen.bin
