@@ -13,6 +13,7 @@ generator, and seven noise colors. The built-in help is always on the device: pr
 | `-` / `=` | Volume down / up (0-10) |
 | `o` | Output: `spk` (speaker) or `hp` (headphones, lower level cap) |
 | `w` | Toggle sine / square wave (tones only) |
+| `c` | Change the carrier pitch used for pulsed low frequencies (150-400 Hz) |
 | `t` | Cycle auto-stop timer: off, 5, 10, 15, 30, 60 min |
 | `r` | Rotate the screen 180 degrees |
 | `h` | Help (use `;` and `.` to change page, any other key closes) |
@@ -53,11 +54,22 @@ The tone updates live while it is playing.
 | 440 Hz | Concert A 440 | Standard concert pitch A4, a handy tuning reference |
 | 136.1 Hz | OM tone | Tied to Earth's year; used in meditation and chanting |
 | 111 Hz | 111 Hz | Popular meditation tone, said to aid relaxation |
-| 7.83 Hz | Schumann 7.83 | Earth's resonance; too low for the built-in speaker |
-| 40 Hz | Gamma 40 | Gamma brainwave range (focus); too low for the speaker |
-| 10 Hz | Alpha 10 | Alpha range (relaxed wakefulness); too low for the speaker |
-| 6 Hz | Theta 6 | Theta range (drowsy, meditative); too low for the speaker |
-| 2 Hz | Delta 2 | Delta range (deep sleep); too low for the speaker |
+| 2 Hz | Delta 2 | Delta range (deep sleep); played as slow pulses |
+| 6 Hz | Theta 6 | Theta range (drowsy, meditative); played as pulses |
+| 7.83 Hz | Schumann 7.83 | Earth's resonance; played as soft pulses |
+| 10 Hz | Alpha 10 | Alpha range (relaxed wakefulness); played as pulses |
+| 20 Hz | Beta 20 | Beta range (alert, active focus); played as pulses |
+| 40 Hz | Gamma 40 | Gamma range (high focus); played as pulses |
+
+### Low frequencies (40 Hz and below)
+
+No speaker or headphones can reproduce a pure tone this low, so these play as **isochronic pulses**:
+an audible carrier tone (250 Hz by default, change it with `c`) that is smoothly switched on and off
+at the target rate. You hear and feel the rhythm instead of a tone that is too deep to hear.
+The same applies to anything you type in Custom mode at 40 Hz or below.
+
+- Sine waveform (`w`) gives soft swelling pulses; square gives sharper on/off pulses.
+- Headphones work best, and keep the volume low.
 
 ## Noise colors
 
@@ -81,8 +93,8 @@ running the output at full scale.
   setting. Headphones are far more sensitive than the speaker.
 - Still hearing distortion? Lower `HW_VOLUME`, `MAX_GAIN_SPK` or `MAX_GAIN_HP` at the top of
   `src/main.cpp` and rebuild.
-- The built-in speaker is clearest between roughly 200 Hz and 8 kHz. Below about 100 Hz it is very
-  faint or silent; use headphones or an external amplifier for the low presets.
+- The built-in speaker is clearest between roughly 200 Hz and 8 kHz. Tones between 40 and 100 Hz are
+  very faint on the speaker; use headphones or an external amplifier.
 - Sine is smoother; square is louder.
 - If the screen is upside down, press `r`.
 

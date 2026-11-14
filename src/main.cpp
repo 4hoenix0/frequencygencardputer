@@ -25,6 +25,12 @@ static const float TONE_AMP_SQUARE = 0.3f;
 static const uint32_t SR = 48000;
 static const size_t BUF_LEN = 1024;
 
+// Anything at or below this rate is too low to hear as a tone, so it is played
+// as isochronic pulses: an audible carrier switched on/off at that rate.
+static const float PULSE_MAX_HZ = 40.5f;
+static const float CARRIERS[] = {150.0f, 200.0f, 250.0f, 300.0f, 400.0f};
+static const int NUM_CARRIERS = sizeof(CARRIERS) / sizeof(CARRIERS[0]);
+
 // ---------------- data ----------------
 struct Preset {
   float hz;
@@ -46,11 +52,13 @@ const Preset PRESETS[] = {
   {440.0f, "Concert A 440", "Standard concert pitch A4. Handy tuning reference."},
   {136.1f, "OM tone", "Tied to Earth's year; used in meditation and chanting."},
   {111.0f, "111 Hz", "Popular meditation tone, said to aid relaxation."},
-  {7.83f,  "Schumann 7.83", "Earth's resonance. Too low for the built-in speaker."},
-  {40.0f,  "Gamma 40", "Gamma brainwave range (focus). Too low for speaker."},
-  {10.0f,  "Alpha 10", "Alpha range (relaxed wakefulness). Too low for speaker."},
-  {6.0f,   "Theta 6", "Theta range (drowsy, meditative). Too low for speaker."},
-  {2.0f,   "Delta 2", "Delta range (deep sleep). Too low for speaker."},
+  // Rates at or below PULSE_MAX_HZ play as pulses of a carrier tone (isochronic).
+  {2.0f,   "Delta 2", "Delta (deep sleep). Plays as slow pulses, 2 per second."},
+  {6.0f,   "Theta 6", "Theta (drowsy, meditative). Pulses, 6 per second."},
+  {7.83f,  "Schumann 7.83", "Earth's resonance. Soft pulses, 7.83 per second."},
+  {10.0f,  "Alpha 10", "Alpha (relaxed wakefulness). Pulses, 10 per second."},
+  {20.0f,  "Beta 20", "Beta (alert, active focus). Pulses, 20 per second."},
+  {40.0f,  "Gamma 40", "Gamma (high focus). Pulses, 40 per second."},
 };
 const int NUM_PRESETS = sizeof(PRESETS) / sizeof(PRESETS[0]);
 
@@ -90,7 +98,7 @@ const char* HELP_LINES[HELP_PAGES][9] = {
    "w       sine / square wave",
    "t       auto-stop timer",
    "r       rotate screen    h  help",
-   nullptr},
+   "c       pulse carrier pitch"},
   {";       previous (up)",
    ".       next (down)",
    "Enter   play / stop",
@@ -109,14 +117,13 @@ const char* HELP_LINES[HELP_PAGES][9] = {
    "Range: 0.1 - 20000 Hz",
    nullptr, nullptr},
   {"Speaker is clearest 200 Hz - 8 kHz.",
-   "Below ~100 Hz it is faint or silent:",
-   "use headphones or an amp.",
+   "Rates up to 40 Hz are played as",
+   "pulses of a carrier tone (c = its",
+   "pitch). Best on headphones; keep",
+   "the volume low.",
    "",
-   "Headphones crackling? Press o for",
-   "hp mode and lower the volume.",
-   "Sine is smoother; square louder.",
-   "Use the timer for long sessions.",
-   nullptr},
+   "Crackling? Press o for hp mode.",
+   "Pulses: sine = soft, square = sharp."},
 };
 
 // ---------------- UI state ----------------
@@ -137,6 +144,7 @@ int timerIdx = 0;
 bool playing = false;
 bool sine = true;
 bool headphones = false;
+int carrierIdx = 2;  // pulse carrier pitch (250 Hz)
 int volume = 5;  // 0-10
 unsigned long playStartMs = 0;
 bool helpOn = false;
@@ -148,6 +156,7 @@ volatile int g_src = 0;        // 0 = tone, 1..7 = noise type + 1
 volatile float g_hz = 440.0f;
 volatile float g_gain = 0.0f;  // 0..1 master level
 volatile bool g_sine = true;
+volatile float g_pulse = 0.0f;  // >0: pulse the tone at this rate (g_hz is then the carrier)
 
 // ---------------- noise generators ----------------
 struct NoiseState {
@@ -243,6 +252,7 @@ static int16_t audioBuf[3][BUF_LEN];
 void audioTask(void*) {
   int idx = 0;
   float phase = 0.0f;
+  float mphase = 0.0f;  // pulse (modulation) phase
   float gain = 0.0f;
   bool pending = false;
 
@@ -259,8 +269,11 @@ void audioTask(void*) {
       const float hz = g_hz;
       const float target = on ? g_gain : 0.0f;
       const bool isSine = g_sine;
+      const float pulseHz = g_pulse;
+      const bool pulsing = (src == 0 && pulseHz > 0.0f);
       const float inc = hz / (float)SR;
-      const float amp = isSine ? TONE_AMP_SINE : TONE_AMP_SQUARE;
+      const float minc = pulseHz / (float)SR;
+      const float amp = (isSine || pulsing) ? TONE_AMP_SINE : TONE_AMP_SQUARE;
 
       for (size_t i = 0; i < BUF_LEN; i++) {
         gain += (target - gain) * 0.003f;  // ~7 ms smoothing: no clicks, no pops
@@ -268,7 +281,20 @@ void audioTask(void*) {
         if (src == 0) {
           phase += inc;
           if (phase >= 1.0f) phase -= 1.0f;
-          if (isSine) {
+          if (pulsing) {
+            // sine carrier, amplitude-modulated at the pulse rate (isochronic tone)
+            mphase += minc;
+            if (mphase >= 1.0f) mphase -= 1.0f;
+            float env;
+            if (isSine) {
+              env = 0.5f * (1.0f - cosf(2.0f * (float)PI * mphase));  // soft swell
+            } else {
+              env = 0.5f + 2.5f * sinf(2.0f * (float)PI * mphase);    // sharper on/off
+              if (env < 0.0f) env = 0.0f;
+              if (env > 1.0f) env = 1.0f;
+            }
+            s = sinf(2.0f * (float)PI * phase) * amp * env;
+          } else if (isSine) {
             s = sinf(2.0f * (float)PI * phase) * amp;
           } else {
             s = (phase < 0.5f ? amp : -amp);
@@ -312,9 +338,17 @@ void applyGain() {
 
 void applySource() {
   if (mode == MODE_NOISE) {
+    g_pulse = 0.0f;
     g_src = noiseIdx + 1;
   } else {
-    g_hz = clampHz(curHz);
+    float hz = clampHz(curHz);
+    if (hz <= PULSE_MAX_HZ) {
+      g_pulse = hz;                 // too low to hear: pulse a carrier at this rate
+      g_hz = CARRIERS[carrierIdx];
+    } else {
+      g_pulse = 0.0f;
+      g_hz = hz;
+    }
     g_src = 0;
   }
   g_sine = sine;
@@ -488,7 +522,12 @@ void draw() {
 
   if (mode != MODE_NOISE) {
     float shownHz = (mode == MODE_PRESETS) ? PRESETS[presetIdx].hz : clampHz(customBuf.toFloat());
-    if (shownHz < 100.0f) {
+    if (shownHz <= PULSE_MAX_HZ) {
+      char pm[40];
+      snprintf(pm, sizeof(pm), "Pulsed on %g Hz tone (c: pitch)", CARRIERS[carrierIdx]);
+      canvas.setTextColor(C_ACC);
+      canvas.drawString(pm, 4, 125);
+    } else if (shownHz < 100.0f) {
       canvas.setTextColor(ORANGE);
       canvas.drawString("Too low for built-in speaker", 4, 125);
     }
@@ -566,6 +605,11 @@ void handleChar(char c) {
   if (c == 't' || c == 'T') {
     timerIdx = (timerIdx + 1) % NUM_TIMERS;
     if (playing) playStartMs = millis();
+    return;
+  }
+  if (c == 'c' || c == 'C') {
+    carrierIdx = (carrierIdx + 1) % NUM_CARRIERS;
+    restartIfPlaying();
     return;
   }
   if (c == 'r' || c == 'R') {
