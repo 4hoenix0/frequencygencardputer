@@ -15,8 +15,28 @@ generator, and seven noise colors. The built-in help is always on the device: pr
 | `w` | Toggle sine / square wave (tones only) |
 | `c` | Change the carrier pitch used for pulsed low frequencies (150-400 Hz) |
 | `t` | Cycle auto-stop timer: off, 5, 10, 15, 30, 60 min |
+| `s` | Screen sleep timeout: off, 15 s, 30 s, 1 min, 2 min (default 30 s) |
+| `b` | Battery screen (any key closes it) |
 | `r` | Rotate the screen 180 degrees |
 | `h` | Help (use `;` and `.` to change page, any other key closes) |
+
+## Screen sleep, battery and charging
+
+- **Screen sleep:** after the chosen time with no key presses the screen turns off to save battery.
+  Sound keeps playing and the auto-stop timer keeps running. Press any key to wake it (that key is
+  only used to wake, so you can't change anything by accident in your pocket).
+- **Battery:** the header shows a battery icon and percentage (`+` in front means charging). Press
+  `b` for a full battery screen with percentage, voltage and a time estimate.
+- **Time estimate:** shown as "left" on battery or "to full" while charging. It starts as a rough
+  guess and becomes more accurate as the firmware measures how fast the percentage changes. It is an
+  estimate only; screen, volume and audio all change real battery life.
+- **Charging screen:** when you plug in, the battery screen shows for 5 seconds. If the screen is
+  asleep while charging, it dims and shows the battery status instead of turning fully off. On
+  battery, a sleeping screen is fully off.
+- **Charge detection:** if the hardware reports its charge state it is used directly. If not, the
+  firmware infers charging from the battery voltage rising over about a minute and shows
+  "Charging (detected)", so it can take a minute to notice a cable being plugged in or removed.
+- Screen sleep timeout resets to 30 s when the device restarts.
 
 ### Presets and Noise modes
 | Key | Action |
